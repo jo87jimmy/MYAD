@@ -47,6 +47,21 @@ def loss_fucntion(a, b):
 #     return loss
 
 
+# 蒸餾損失函數
+def distillation_loss(teacher_features, student_features):
+    cos_loss = torch.nn.CosineSimilarity()
+    if not isinstance(teacher_features, (list, tuple)):
+        teacher_features, student_features = [teacher_features
+                                              ], [student_features]
+
+    loss = 0
+    for i in range(len(teacher_features)):
+        loss += torch.mean(1 - cos_loss(
+            teacher_features[i].view(teacher_features[i].shape[0], -1),
+            student_features[i].view(student_features[i].shape[0], -1)))
+    return loss
+
+
 def train(_arch_, _class_, epochs, save_pth_path):
     # 訓練流程
     print(f"🔧 類別: {_class_} | Epochs: {epochs}")
@@ -78,18 +93,9 @@ def train(_arch_, _class_, epochs, save_pth_path):
                                                   batch_size=1,
                                                   shuffle=False)
 
-    # # 使用 Wide-ResNet50 預訓練模型作為編碼器
-    # encoder, bn = wide_resnet50_2(pretrained=True)
-    # encoder = encoder.to(device)
-    # bn = bn.to(device)
-    # encoder.eval()  # encoder 不進行訓練
-    # decoder = de_wide_resnet50_2(pretrained=False)
-    # decoder = decoder.to(device)
-
-    encoder = ReconstructiveSubNetwork(in_channels=3, out_channels=3)
-    decoder = DiscriminativeSubNetwork(in_channels=6, out_channels=2)
-    encoder = encoder.to(device)
-    decoder = decoder.to(device)
+    # 教師模型（預訓練 DRAEM，凍結）
+    teacher_encoder = ReconstructiveSubNetwork(in_channels=3, out_channels=3)
+    teacher_decoder = DiscriminativeSubNetwork(in_channels=6, out_channels=2)
     # === Step 2: 載入 checkpoint ===
     encoder_ckpt = torch.load(
         "DRAEM_seg_large_ae_large_0.0001_800_bs8_bottle_.pckl",
@@ -99,20 +105,25 @@ def train(_arch_, _class_, epochs, save_pth_path):
         "DRAEM_seg_large_ae_large_0.0001_800_bs8_bottle__seg.pckl",
         map_location=device,
         weights_only=True)
+    teacher_encoder.load_state_dict(encoder_ckpt)
+    teacher_decoder.load_state_dict(decoder_ckpt)
+    # 重要：載入權重後再移到設備
+    teacher_encoder = teacher_encoder.to(device)
+    teacher_decoder = teacher_decoder.to(device)
+    teacher_encoder.eval()
+    teacher_decoder.eval()
 
-    # === Step 3: 套用權重 ===
-    encoder.load_state_dict(encoder_ckpt)
-    decoder.load_state_dict(decoder_ckpt)
-    encoder.eval()
+    # 學生模型（需要訓練）
+    student_encoder = ReconstructiveSubNetwork(in_channels=3, out_channels=3)
+    student_decoder = DiscriminativeSubNetwork(in_channels=6, out_channels=2)
+    student_encoder = student_encoder.to(device)
+    student_decoder = student_decoder.to(device)
 
-    # 建立優化器，只訓練 decoder 與 BN
-    optimizer = torch.optim.Adam(list(decoder.parameters()),
+    # 建立優化器，訓練學生模型
+    optimizer = torch.optim.Adam(list(student_encoder.parameters()) +
+                                 list(student_decoder.parameters()),
                                  lr=learning_rate,
                                  betas=(0.5, 0.999))
-    # optimizer = torch.optim.Adam(list(decoder.parameters()) +
-    #                              list(bn.parameters()),
-    #                              lr=learning_rate,
-    #                              betas=(0.5, 0.999))
 
     # 建立輸出資料夾
     save_pth_dir = save_pth_path if save_pth_path else 'pths/best'
@@ -126,48 +137,56 @@ def train(_arch_, _class_, epochs, save_pth_path):
 
     # 訓練迴圈
     for epoch in range(epochs):
-        # bn.train()
-        decoder.train()
+        student_encoder.train()
+        student_decoder.train()
         loss_list = []
+
         for img, label in train_dataloader:
             img = img.to(device)
-            inputs = encoder(img)  # 3 channels
-            concatenated_input = torch.cat([img, inputs], dim=1)  # 6 channels
-            outputs = decoder(concatenated_input)
 
-            # inputs = encoder(img)  # 特徵抽取
-            # outputs = decoder(inputs)  # 重建影像特徵
-            # outputs = decoder(bn(inputs))  # 重建影像特徵
-            loss = loss_fucntion(inputs, outputs)  # 計算損失
+            # 教師模型推理
+            with torch.no_grad():
+                teacher_recon = teacher_encoder(img)
+                teacher_input = torch.cat([img, teacher_recon], dim=1)
+                teacher_seg = teacher_decoder(teacher_input)
+
+            # 學生模型推理
+            student_recon = student_encoder(img)
+            student_input = torch.cat([img, student_recon], dim=1)
+            student_seg = student_decoder(student_input)
+
+            # 蒸餾損失：比較相同語義的輸出
+            recon_loss = distillation_loss(teacher_recon, student_recon)
+            seg_loss = distillation_loss(teacher_seg, student_seg)
+
+            total_loss = recon_loss + seg_loss
+
             optimizer.zero_grad()
-            loss.backward()
+            total_loss.backward()  # 修正：使用 total_loss
             optimizer.step()
-            loss_list.append(loss.item())
+            loss_list.append(total_loss.item())
 
         print(
             f"📘 Epoch [{epoch + 1}/{epochs}] | Loss: {np.mean(loss_list):.4f}")
 
-        # 每個 epoch 都進行一次評估
-        auroc_px, auroc_sp, aupro_px = evaluation(encoder, decoder,
+        # 每個 epoch 都進行一次評估（使用學生模型）
+        auroc_px, auroc_sp, aupro_px = evaluation(student_encoder,
+                                                  student_decoder,
                                                   test_dataloader, device)
-        # auroc_px, auroc_sp, aupro_px = evaluation(encoder, bn, decoder,
-        #                                           test_dataloader, device)
         print(f"🔍 評估 | Pixel AUROC: {auroc_px:.3f}")
 
-        # 如果表現更好則儲存模型
+        # 如果表現更好則儲存學生模型
         if auroc_px > best_score:
             best_score = auroc_px
             torch.save(
                 {
-                    # 'bn': bn.state_dict(),
-                    'decoder': decoder.state_dict()
-                },
-                best_ckp_path)
+                    'encoder': student_encoder.state_dict(),
+                    'decoder': student_decoder.state_dict()
+                }, best_ckp_path)
             print(f"💾 更新最佳模型 → {best_ckp_path}")
 
     # 訓練結束回傳最佳結果
-    # return best_ckp_path, best_score, auroc_sp, aupro_px, bn, decoder
-    return best_ckp_path, best_score, auroc_sp, aupro_px, decoder
+    return best_ckp_path, best_score, auroc_sp, aupro_px, student_encoder, student_decoder
 
 
 if __name__ == '__main__':
