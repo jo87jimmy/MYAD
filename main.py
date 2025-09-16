@@ -23,30 +23,6 @@ def setup_seed(seed):
     torch.backends.cudnn.benchmark = False  # 關閉自動最佳化搜尋
 
 
-def loss_fucntion(a, b):
-    cos_loss = torch.nn.CosineSimilarity()
-    # 如果是單個張量，直接計算
-    if not isinstance(a, (list, tuple)):
-        a, b = [a], [b]
-
-    loss = 0
-    for item in range(len(a)):
-        loss += torch.mean(1 - cos_loss(a[item].view(a[item].shape[0], -1),
-                                        b[item].view(b[item].shape[0], -1)))
-    return loss
-
-
-# def loss_fucntion(a, b):
-#     # 自訂的損失函式：基於 Cosine 相似度
-#     cos_loss = torch.nn.CosineSimilarity()
-#     loss = 0
-#     for item in range(len(a)):
-#         # 將特徵展平後計算 Cosine 相似度
-#         loss += torch.mean(1 - cos_loss(a[item].view(a[item].shape[0], -1),
-#                                         b[item].view(b[item].shape[0], -1)))
-#     return loss
-
-
 # 蒸餾損失函數
 def distillation_loss(teacher_features, student_features):
     cos_loss = torch.nn.CosineSimilarity()
