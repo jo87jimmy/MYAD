@@ -5,17 +5,12 @@ import numpy as np  # 數值計算套件
 import random  # 亂數控制
 import os  # 檔案系統操作
 from torch.utils.data import DataLoader  # PyTorch 的資料載入器
-# from resnet import resnet18, resnet34, resnet50, wide_resnet50_2  # 引入 ResNet 模型
-# from de_resnet import de_resnet18, de_resnet34, de_wide_resnet50_2, de_resnet50  # 引入解碼器 ResNet
 from dataset import MVTecDataset  # MVTec 資料集類別
 import torch.backends.cudnn as cudnn  # CUDA cuDNN 加速
 import argparse  # 命令列參數處理
 from test import evaluation, visualization, test  # 測試、評估與可視化函式
 from torch.nn import functional as F  # 引入 PyTorch 的函式介面
 from model_unet import ReconstructiveSubNetwork, DiscriminativeSubNetwork  # 假設你的 DRAEM 定義在 models/draem.py
-# def count_parameters(model):
-#     # 計算模型的可訓練參數數量
-#     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def setup_seed(seed):
@@ -29,40 +24,26 @@ def setup_seed(seed):
 
 
 def loss_fucntion(a, b):
-    # 自訂的損失函式：基於 Cosine 相似度
     cos_loss = torch.nn.CosineSimilarity()
+    # 如果是單個張量，直接計算
+    if not isinstance(a, (list, tuple)):
+        a, b = [a], [b]
+
     loss = 0
     for item in range(len(a)):
-        # 將特徵展平後計算 Cosine 相似度
         loss += torch.mean(1 - cos_loss(a[item].view(a[item].shape[0], -1),
                                         b[item].view(b[item].shape[0], -1)))
     return loss
 
 
-# def loss_concat(a, b):
-#     # 將多層特徵圖 resize 成相同大小後再比較
-#     mse_loss = torch.nn.MSELoss()
+# def loss_fucntion(a, b):
+#     # 自訂的損失函式：基於 Cosine 相似度
 #     cos_loss = torch.nn.CosineSimilarity()
 #     loss = 0
-#     a_map = []
-#     b_map = []
-#     size = a[0].shape[-1]  # 以第一層的特徵圖大小為基準
 #     for item in range(len(a)):
-#         # 將特徵插值到相同大小
-#         a_map.append(
-#             F.interpolate(a[item],
-#                           size=size,
-#                           mode='bilinear',
-#                           align_corners=True))
-#         b_map.append(
-#             F.interpolate(b[item],
-#                           size=size,
-#                           mode='bilinear',
-#                           align_corners=True))
-#     # 將多層特徵拼接後再計算 Cosine 相似度
-#     a_map = torch.cat(a_map, 1)
-#     b_map = torch.cat(b_map, 1)
-#     loss += torch.mean(1 - cos_loss(a_map, b_map))
+#         # 將特徵展平後計算 Cosine 相似度
+#         loss += torch.mean(1 - cos_loss(a[item].view(a[item].shape[0], -1),
+#                                         b[item].view(b[item].shape[0], -1)))
 #     return loss
 
 
@@ -137,10 +118,6 @@ def train(_arch_, _class_, epochs, save_pth_path):
     save_pth_dir = save_pth_path if save_pth_path else 'pths/best'
     os.makedirs(save_pth_dir, exist_ok=True)
 
-    # 確保 Kaggle working 資料夾存在，通常可將 save_dir 放在 /kaggle/working 下
-    # kaggle_save_dir = os.path.join('/kaggle/working', save_pth_dir)
-    # os.makedirs(kaggle_save_dir, exist_ok=True)
-
     # 設定最佳權重檔案存放路徑
     best_ckp_path = os.path.join(save_pth_dir, f'best_{_arch_}_{_class_}.pth')
 
@@ -154,8 +131,12 @@ def train(_arch_, _class_, epochs, save_pth_path):
         loss_list = []
         for img, label in train_dataloader:
             img = img.to(device)
-            inputs = encoder(img)  # 特徵抽取
-            outputs = decoder(inputs)  # 重建影像特徵
+            inputs = encoder(img)  # 3 channels
+            concatenated_input = torch.cat([img, inputs], dim=1)  # 6 channels
+            outputs = decoder(concatenated_input)
+
+            # inputs = encoder(img)  # 特徵抽取
+            # outputs = decoder(inputs)  # 重建影像特徵
             # outputs = decoder(bn(inputs))  # 重建影像特徵
             loss = loss_fucntion(inputs, outputs)  # 計算損失
             optimizer.zero_grad()
@@ -210,36 +191,6 @@ if __name__ == '__main__':
         args.arch, args.category, args.epochs, save_pth_path)
 
     print(f"最佳模型: {best_ckp}")
-
-    # # === 儲存最佳模型到 Kaggle Output 目錄（持久化） ===
-    # working_dir = "/kaggle/working"
-    # ckpt_dir = os.path.join(working_dir, "checkpoints")
-    # os.makedirs(ckpt_dir, exist_ok=True)
-
-    # # 產生易讀的檔名：模型-類別-指標-epochs-時間戳
-    # ts = time.strftime("%Y%m%d_%H%M%S")
-    # nice_name = f"best_{args.arch}_{args.category}_pxAUC{auroc_px:.4f}_e{args.epochs}_{ts}.pth"
-    # nice_path = os.path.join(ckpt_dir, nice_name)
-
-    # # 實際存檔（建議只存 state_dict，比較穩定）
-    # torch.save(
-    #     {
-    #         "arch": args.arch,
-    #         "category": args.category,
-    #         "epochs": args.epochs,
-    #         "metrics": {
-    #             "pixel_auroc": auroc_px,
-    #             "sample_auroc": auroc_sp,
-    #             "pixel_aupro": aupro_px
-    #         },
-    #         "bn_state_dict": bn.state_dict(),
-    #         "decoder_state_dict": decoder.state_dict()
-    #     }, nice_path)
-
-    # # 同步一份固定檔名（方便 pipeline 直接讀取）
-    # fixed_name = f"best_{args.arch}_{args.category}.pth"
-    # shutil.copy2(nice_path, fixed_name)
-    # print(f"📦 已同步固定檔名：{fixed_name}")
 
     # 存訓練指標到 CSV
     df_metrics = pd.DataFrame([{

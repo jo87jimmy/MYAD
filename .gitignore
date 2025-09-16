@@ -14,3 +14,4 @@ mvtec/
 *.tar.gz
 *.tgz
 *.pckl
+*.pyc

@@ -19,7 +19,7 @@ class ReconstructiveSubNetwork(nn.Module):
 class DiscriminativeSubNetwork(nn.Module):
 
     def __init__(self,
-                 in_channels=6,
+                 in_channels=3,
                  out_channels=3,
                  base_channels=64,
                  out_features=False):
